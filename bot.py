@@ -1,11 +1,9 @@
 import logging
 import os
 import json
-import base64
-from io import BytesIO
-from datetime import datetime, timedelta, timezone
-import requests
+from functools import wraps
 from dotenv import load_dotenv
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -18,23 +16,16 @@ from telegram.ext import (
 )
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font
-from github import Github
 
 load_dotenv()
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-# Variabel lingkungan untuk GitHub
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-GITHUB_REPO = os.getenv("GITHUB_REPO")  # Format: "username/repository-name"
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Konversi dari pixel ke nilai column width openpyxl
-PIXEL_WIDTH = 314
-COLUMN_WIDTH = (PIXEL_WIDTH - 5) / 7  # ≈ 44.2
+WALLET_FILE = "wallet_address.json"
+EXCEL_FILE = "shareithub_data_airdrop.xlsx"
 
-# Konstanta nama file untuk masing-masing user (file wallet dan file Excel)
-WALLET_FILENAME = "wallet_address.json"
-EXCEL_FILENAME = "shareithub_data_airdrop.xlsx"
-
-# State ConversationHandler
 INPUT_WALLET_ADDRESS, CHOOSE_WALLET_TYPE, INPUT_CHAIN = range(1, 4)
 INPUT_AIRDROP_LINK, INPUT_AIRDROP_TITLE, CHOOSE_AIRDROP_TYPE, CHOOSE_WALLET = range(10, 14)
 CHOOSE_WALLET_DELETE = 20
@@ -42,111 +33,80 @@ CHOOSE_AIRDROP_DELETE = 30
 REMINDER_SETT_MODE, REMINDER_SETT_DELAY, REMINDER_SETT_CHOOSE = range(50, 53)
 STOP_REMINDER_CHOOSE = 60
 
-# --- Fungsi Integrasi GitHub ---
+# Konversi dari pixel ke nilai column width openpyxl
+PIXEL_WIDTH = 314
+COLUMN_WIDTH = (PIXEL_WIDTH - 5) / 7  # ≈ 44.2
 
-def get_github_repo():
-    g = Github(GITHUB_TOKEN)
-    return g.get_repo(GITHUB_REPO)
+def get_workbook():
+    """
+    Jika file Excel sudah ada, load file tersebut.
+    Jika tidak, buat workbook baru dengan header dan format sesuai.
+    """
+    if os.path.exists(EXCEL_FILE):
+        wb = load_workbook(EXCEL_FILE)
+    else:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "AirdropData"
+        # Header baru: LINK AIRDROP, AIRDROP NAME, AIRDROP TYPE, WALLET ADDRESS, DATE & TIME
+        header = ["LINK AIRDROP", "AIRDROP NAME", "AIRDROP TYPE", "WALLET ADDRESS", "DATE & TIME"]
+        ws.append(header)
+        # Set format header: bold, center alignment
+        for col in ws.iter_cols(min_row=1, max_row=1, min_col=1, max_col=5):
+            for cell in col:
+                cell.font = Font(bold=True)
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+        # Set lebar kolom untuk kolom A sampai E
+        for col in ["A", "B", "C", "D", "E"]:
+            ws.column_dimensions[col].width = COLUMN_WIDTH
+        wb.save(EXCEL_FILE)
+    return wb
 
-def get_github_file_path(user_id: str, filename: str) -> str:
-    """Menghasilkan path file di repository berdasarkan user_id."""
-    return f"data user/{user_id}/{filename}"
+def save_workbook(wb):
+    wb.save(EXCEL_FILE)
 
-# --- Fungsi untuk Mengelola File Wallet di GitHub ---
+def restricted(func):
+    @wraps(func)
+    async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        user_id = update.effective_user.id
+        if user_id != ADMIN_ID:
+            if update.message:
+                await update.message.reply_text("Maaf, Anda tidak memiliki izin untuk menggunakan bot ini. Jangan lupa Subscribe Channel Youtube & Telegram : SHARE IT HUB")
+            elif update.callback_query:
+                await update.callback_query.answer("Maaf, Anda tidak memiliki izin.", show_alert=True)
+            return
+        return await func(update, context, *args, **kwargs)
+    return wrapped
 
-def load_wallets(user_id: str):
-    repo = get_github_repo()
-    path = get_github_file_path(user_id, WALLET_FILENAME)
-    try:
-        file_content = repo.get_contents(path)
-        content = file_content.decoded_content.decode("utf-8")
-        return json.loads(content)
-    except Exception:
-        return {}
+def load_wallets():
+    if os.path.exists(WALLET_FILE):
+        with open(WALLET_FILE, "r") as f:
+            try:
+                return json.load(f)
+            except json.decoder.JSONDecodeError:
+                return {}
+    return {}
 
-def save_wallet(user_id: str, address: str, chain: str):
-    repo = get_github_repo()
-    path = get_github_file_path(user_id, WALLET_FILENAME)
-    wallets = load_wallets(user_id)
+def save_wallet(user_id, address, chain):
+    wallets = load_wallets()
     address = address.strip()
     chain = chain.upper()
     if user_id not in wallets:
         wallets[user_id] = []
     wallets[user_id].append({"address": address, "chain": chain})
-    content = json.dumps(wallets, indent=4)
-    try:
-        file = repo.get_contents(path)
-        repo.update_file(path, "Update wallet_address.json", content, file.sha)
-    except Exception:
-        repo.create_file(path, "Create wallet_address.json", content)
+    with open(WALLET_FILE, "w") as f:
+        json.dump(wallets, f, indent=4)
 
-def delete_wallet_by_index(user_id: str, index: int):
-    wallets = load_wallets(user_id)
+def delete_wallet_by_index(user_id, index: int):
+    wallets = load_wallets()
     user_wallets = wallets.get(user_id, [])
     if 0 <= index < len(user_wallets):
         removed = user_wallets.pop(index)
         wallets[user_id] = user_wallets
-        content = json.dumps(wallets, indent=4)
-        repo = get_github_repo()
-        path = get_github_file_path(user_id, WALLET_FILENAME)
-        try:
-            file = repo.get_contents(path)
-            repo.update_file(path, "Update wallet_address.json", content, file.sha)
-        except Exception:
-            repo.create_file(path, "Create wallet_address.json", content)
+        with open(WALLET_FILE, "w") as f:
+            json.dump(wallets, f, indent=4)
         return removed
     return None
-
-# --- Fungsi untuk Mengelola File Excel (Airdrop) di GitHub ---
-# Proses pengambilan file Excel dilakukan melalui download_url sehingga file asli (original) diperoleh.
-
-def get_workbook(user_id: str):
-    excel_path = get_github_file_path(user_id, EXCEL_FILENAME)
-    repo = get_github_repo()
-    try:
-        file_content = repo.get_contents(excel_path)
-        # Ambil file original melalui download_url
-        download_url = file_content.download_url
-        response = requests.get(download_url)
-        response.raise_for_status()
-        binary_data = response.content  # File original dalam bentuk binary
-        wb = load_workbook(BytesIO(binary_data))
-    except Exception as e:
-        logging.error(e)
-        # Jika file tidak ada, buat workbook baru
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "AirdropData"
-        header = ["LINK AIRDROP", "AIRDROP NAME", "AIRDROP TYPE", "WALLET ADDRESS", "DATE & TIME"]
-        ws.append(header)
-        for col in ws.iter_cols(min_row=1, max_row=1, min_col=1, max_col=5):
-            for cell in col:
-                cell.font = Font(bold=True)
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-        for col in ["A", "B", "C", "D", "E"]:
-            ws.column_dimensions[col].width = COLUMN_WIDTH
-        # Simpan workbook baru ke binary dan unggah ke GitHub
-        stream = BytesIO()
-        wb.save(stream)
-        stream.seek(0)
-        data = stream.read()
-        repo.create_file(excel_path, "Create new Excel file", base64.b64encode(data).decode("utf-8"))
-    return wb
-
-def save_workbook(wb, user_id: str):
-    excel_path = get_github_file_path(user_id, EXCEL_FILENAME)
-    repo = get_github_repo()
-    stream = BytesIO()
-    wb.save(stream)
-    stream.seek(0)
-    data = stream.read()
-    try:
-        file = repo.get_contents(excel_path)
-        repo.update_file(excel_path, "Update Excel file", base64.b64encode(data).decode("utf-8"), file.sha)
-    except Exception:
-        repo.create_file(excel_path, "Create Excel file", base64.b64encode(data).decode("utf-8"))
-
-# --- Fungsi Bot Telegram ---
 
 def get_main_keyboard():
     keyboard = [
@@ -163,10 +123,9 @@ def get_main_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
+@restricted
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("This bot was created by: SHARE IT HUB🚀", reply_markup=get_main_keyboard())
-
-# --- Wallet Handling ---
 
 async def add_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -186,10 +145,9 @@ async def receive_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def choose_chain(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = str(query.from_user.id)
     if query.data == "wallet_type_evm":
         chain = "EVM"
-        save_wallet(user_id, context.user_data["wallet_address"], chain)
+        save_wallet(str(query.from_user.id), context.user_data["wallet_address"], chain)
         await query.message.reply_text(f"✅ WALLET {context.user_data['wallet_address']} (EVM) BERHASIL DISIMPAN!", reply_markup=get_main_keyboard())
         return ConversationHandler.END
     await query.message.reply_text("Silakan masukkan nama CHAIN untuk wallet Anda:")
@@ -197,12 +155,9 @@ async def choose_chain(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def save_other_chain(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chain = update.message.text.strip()
-    user_id = str(update.message.from_user.id)
-    save_wallet(user_id, context.user_data["wallet_address"], chain)
+    save_wallet(str(update.message.from_user.id), context.user_data["wallet_address"], chain)
     await update.message.reply_text(f"✅ WALLET {context.user_data['wallet_address'].upper()} ({chain.upper()}) BERHASIL DISIMPAN!", reply_markup=get_main_keyboard())
     return ConversationHandler.END
-
-# --- Airdrop Handling ---
 
 async def add_airdrop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -233,7 +188,7 @@ async def choose_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     context.user_data["airdrop_type"] = query.data.replace("airdrop_type_", "").upper()
     user_id = str(query.from_user.id)
-    wallets = load_wallets(user_id).get(user_id, [])
+    wallets = load_wallets().get(user_id, [])
     if not wallets:
         await query.message.reply_text("⚠️ ANDA BELUM MEMILIKI WALLET. SILAKAN TAMBAHKAN WALLET TERLEBIH DAHULU.", reply_markup=get_main_keyboard())
         return ConversationHandler.END
@@ -251,30 +206,29 @@ async def save_airdrop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     airdrop_title = context.user_data["airdrop_title"]
     airdrop_type = context.user_data["airdrop_type"]
     user_id = str(query.from_user.id)
-    wallets = load_wallets(user_id).get(user_id, [])
+    wallets = load_wallets().get(user_id, [])
     index = int(query.data.replace("wallet_", ""))
     wallet_address = wallets[index]["address"] if index < len(wallets) else "TIDAK DITEMUKAN"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     new_row = [airdrop_link, airdrop_title, airdrop_type, wallet_address, timestamp]
     
-    wb = get_workbook(user_id)
+    # Simpan data ke file Excel dan format baris yang baru ditambahkan
+    wb = get_workbook()
     ws = wb.active
     ws.append(new_row)
     last_row = ws.max_row
     for col in range(1, 6):
         ws.cell(row=last_row, column=col).alignment = Alignment(horizontal="center", vertical="center")
-    save_workbook(wb, user_id)
+    save_workbook(wb)
     
     await query.message.reply_text("✅ AIRDROP BERHASIL DISIMPAN KE FILE EXCEL!", reply_markup=get_main_keyboard())
     return ConversationHandler.END
-
-# --- Delete Wallet / Airdrop / List Data ---
 
 async def delete_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = str(query.from_user.id)
-    wallets = load_wallets(user_id).get(user_id, [])
+    wallets = load_wallets().get(user_id, [])
     if not wallets:
         await query.message.reply_text("⚠️ TIDAK ADA WALLET YANG DITEMUKAN.", reply_markup=get_main_keyboard())
         return ConversationHandler.END
@@ -306,7 +260,7 @@ async def list_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = str(query.from_user.id)
-    wallets = load_wallets(user_id).get(user_id, [])
+    wallets = load_wallets().get(user_id, [])
     if not wallets:
         await query.message.reply_text("⚠️ Anda belum menyimpan wallet.", reply_markup=get_main_keyboard())
     else:
@@ -321,8 +275,7 @@ async def list_airdrop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     try:
-        user_id = str(query.from_user.id)
-        wb = get_workbook(user_id)  # File Excel original diambil dari repo
+        wb = get_workbook()
         ws = wb.active
         data = list(ws.values)
         if len(data) < 2:
@@ -342,7 +295,7 @@ async def list_airdrop(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
         await query.message.reply_text(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
     except Exception as e:
-        logging.error(e)
+        logger.error(e)
         await query.message.reply_text("⚠️ Terjadi kesalahan saat mengambil data.", reply_markup=get_main_keyboard())
     return ConversationHandler.END
 
@@ -350,8 +303,7 @@ async def delete_airdrop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     try:
-        user_id = str(query.from_user.id)
-        wb = get_workbook(user_id)
+        wb = get_workbook()
         ws = wb.active
         data = list(ws.values)
         if len(data) < 2:
@@ -366,7 +318,7 @@ async def delete_airdrop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("Pilih airdrop yang ingin DIHAPUS:", reply_markup=reply_markup)
         return CHOOSE_AIRDROP_DELETE
     except Exception as e:
-        logging.error(e)
+        logger.error(e)
         await query.message.reply_text("⚠️ Terjadi kesalahan saat mengambil data.", reply_markup=get_main_keyboard())
         return ConversationHandler.END
 
@@ -375,30 +327,26 @@ async def process_delete_airdrop(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
     try:
         row_number = int(query.data.replace("delairdrop_", ""))
-        user_id = str(query.from_user.id)
-        wb = get_workbook(user_id)
+        wb = get_workbook()
         ws = wb.active
         max_row = ws.max_row
         if row_number > 1 and row_number <= max_row:
             ws.delete_rows(row_number, 1)
-            save_workbook(wb, user_id)
+            save_workbook(wb)
             await query.message.reply_text("✅ Airdrop BERHASIL DIHAPUS!", reply_markup=get_main_keyboard())
         else:
             await query.message.reply_text("⚠️ Baris tidak valid.", reply_markup=get_main_keyboard())
     except Exception as e:
-        logging.error(e)
+        logger.error(e)
         await query.message.reply_text("⚠️ Gagal menghapus airdrop.", reply_markup=get_main_keyboard())
     return ConversationHandler.END
-
-# --- Reminder Handling ---
 
 async def reminder_airdrop_job(context: ContextTypes.DEFAULT_TYPE):
     job_data = context.job.data
     chat_id = job_data["chat_id"]
     row_number = job_data["row_number"]
     try:
-        user_id = str(chat_id)
-        wb = get_workbook(user_id)
+        wb = get_workbook()
         ws = wb.active
         max_row = ws.max_row
         if row_number >= 2 and row_number <= max_row:
@@ -414,7 +362,7 @@ async def reminder_airdrop_job(context: ContextTypes.DEFAULT_TYPE):
         else:
             text = "⚠️ Data airdrop tidak ditemukan."
     except Exception as e:
-        logging.error(e)
+        logger.error(e)
         text = "⚠️ Terjadi kesalahan saat mengambil data airdrop."
     await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
 
@@ -450,7 +398,7 @@ async def reminder_sett_choose(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query if update.callback_query else None
     chat_id = query.from_user.id if query else update.message.chat_id
     if context.user_data.get("rem_sett_mode") == "auto":
-        interval = 21600  # 6 jam (4x sehari)
+        interval = 21600  # 21600 detik = 6 jam (4x sehari)
         context.user_data["rem_interval"] = interval
     else:
         try:
@@ -464,8 +412,7 @@ async def reminder_sett_choose(update: Update, context: ContextTypes.DEFAULT_TYP
                 await update.message.reply_text("Delay tidak valid.", reply_markup=get_main_keyboard())
             return ConversationHandler.END
     try:
-        user_id = str(chat_id)
-        wb = get_workbook(user_id)
+        wb = get_workbook()
         ws = wb.active
         data = list(ws.values)
         if len(data) < 2:
@@ -486,7 +433,7 @@ async def reminder_sett_choose(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("Pilih data Airdrop yang ingin di-reminder:", reply_markup=reply_markup)
         return REMINDER_SETT_CHOOSE
     except Exception as e:
-        logging.error(e)
+        logger.error(e)
         if query:
             await query.message.reply_text("⚠️ Terjadi kesalahan saat mengambil data.", reply_markup=get_main_keyboard())
         else:
@@ -518,16 +465,12 @@ async def reminder_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not job_names:
         await query.message.reply_text("Tidak ada reminder airdrop yang dijadwalkan.", reply_markup=get_main_keyboard())
         return ConversationHandler.END
-
     text = "⚙️ *Daftar Reminder Airdrop:*\n\n"
-    wib = timezone(timedelta(hours=7))
     for name in job_names:
         job = context.bot_data.get(name)
         row_number = job.data["row_number"]
         interval_minutes = int(job.data.get("interval", 0) / 60)
-        next_run_wib = job.next_run_time.astimezone(wib) if job.next_run_time else None
-        next_run_str = next_run_wib.strftime("%Y-%m-%d %H:%M:%S") if next_run_wib else "Tidak tersedia"
-        text += f"• Data Airdrop baris {row_number} | Interval: {interval_minutes} menit | Next run: {next_run_str} WIB\n"
+        text += f"• Data Airdrop baris {row_number} | Interval: {interval_minutes} menit | Next run: {job.next_run_time}\n"
     await query.message.reply_text(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
     return ConversationHandler.END
 
@@ -562,61 +505,28 @@ async def process_stop_reminder(update: Update, context: ContextTypes.DEFAULT_TY
         await query.message.reply_text("⚠️ Reminder tidak ditemukan.", reply_markup=get_main_keyboard())
     return ConversationHandler.END
 
-# --- Download Data ---
-
 async def download_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Kirim file Excel ke pengguna."""
     query = update.callback_query
     await query.answer()
-    user_id = str(query.from_user.id)
-    repo = get_github_repo()
-    excel_path = get_github_file_path(user_id, EXCEL_FILENAME)
-    try:
-        file_content = repo.get_contents(excel_path)
-        download_url = file_content.download_url
-        response = requests.get(download_url)
-        response.raise_for_status()
-        bio = BytesIO(response.content)
-        bio.name = EXCEL_FILENAME
-        await query.message.reply_document(document=bio, filename=EXCEL_FILENAME)
-    except Exception as e:
-        logging.error(e)
+    if os.path.exists(EXCEL_FILE):
+        await query.message.reply_document(document=open(EXCEL_FILE, "rb"), filename=EXCEL_FILE)
+    else:
         await query.message.reply_text("File data tidak ditemukan.", reply_markup=get_main_keyboard())
     return
-
-# --- Fitur Membaca Repository ---
-
-def get_github_folder_path(user_id: str) -> str:
-    return f"data user/{user_id}"
-
-async def read_repository(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    repo = get_github_repo()
-    folder_path = get_github_folder_path(user_id)
-    try:
-        contents = repo.get_contents(folder_path)
-        text = "📁 *Data di Repository untuk Anda:*\n\n"
-        for content_file in contents:
-            text += f"• *{content_file.name}*\n"
-        if not contents:
-            text += "Tidak ada data yang ditemukan."
-    except Exception as e:
-        logging.error(e)
-        text = "⚠️ Data repository tidak ditemukan. Pastikan data Anda telah tersimpan."
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
-
-# --- Main Function ---
 
 def main():
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
-        logging.error("Token bot tidak ditemukan.")
+        logger.error("Token bot tidak ditemukan.")
         return
 
-    logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+    # Pastikan file Excel tersedia
+    get_workbook()
+
     app = Application.builder().token(token).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("readrepo", read_repository))
     app.add_handler(CallbackQueryHandler(download_data, pattern="^download_data$"))
 
     stop_reminder_conv_handler = ConversationHandler(
