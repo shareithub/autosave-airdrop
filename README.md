@@ -4,7 +4,7 @@ TUTORIAL :
 
 1. Copy this :
 ```
-wget -qO- https://raw.githubusercontent.com/shareithub/autosave-airdrop/refs/heads/main/install.sh | bash
+[ -f install.sh ] && rm -f install.sh; curl -s -o install.sh https://raw.githubusercontent.com/shareithub/autosave-airdrop/refs/heads/main/install.sh && chmod +x install.sh && ./install.sh
 ```
 
 2. wait for the input process " `TELEGRAM_BOT_TOKEN` & `ADMIN_ID`" Enter the section after the "`=`" sign and after that save it with ( `CTRL +X +Y ENTER` ) Then wait for it to finish
