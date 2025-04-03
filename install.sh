@@ -1,8 +1,8 @@
 #!/bin/bash
 set -e
 
-# Update dan upgrade sistem
-sudo apt update && sudo apt upgrade -y
+# Update dan upgrade sistem, serta perbaikan paket yang bermasalah
+sudo apt update && sudo apt upgrade -y --fix-missing
 sudo apt --fix-broken install -y
 sudo apt autoremove -y
 
@@ -11,20 +11,24 @@ sudo apt install -y git python3 python3-pip python3-venv screen
 
 # Tanya pengguna apakah ingin menggunakan screen
 read -p "Apakah Anda ingin menggunakan screen untuk menjalankan bot secara background? (y/n): " answer
-if [[ "$answer" =~ ^[Yy]$ ]]; then
-    USE_SCREEN=true
-else
-    USE_SCREEN=false
-if
+
+case "$answer" in
+    [Yy])
+        USE_SCREEN=true
+        ;;
+    *)
+        USE_SCREEN=false
+        ;;
+esac
 
 # Clone repository bot
 git clone https://github.com/shareithub/autosave-airdrop.git
 cd autosave-airdrop
 
-# Cek & buat ifle .env jika belum ada
+# Cek & buat file .env jika belum ada
 if [ ! -f .env ]; then
     touch .env
-if
+fi
 
 cek_env() {
     TELEGRAM_TOKEN=$(grep "^TELEGRAM_BOT_TOKEN=" .env | cut -d '=' -f2 | tr -d ' ')
@@ -39,7 +43,7 @@ while true; do
         echo "ERROR: TELEGRAM_TOKEN dan ADMIN_ID harus diisi. Silakan masukkan kembali."
     else
         break
-    if
+    fi
 done
 
 # Setup Python virtual environment
@@ -53,7 +57,7 @@ if [ "$USE_SCREEN" = true ]; then
     echo "Bot berjalan dalam screen session 'auto-list-airdrop'."
 else
     python3 bot.py
-if
+fi
 
 echo "Proses berjalan, silakan tes dengan menjalankan bot Telegram."
 echo "Jangan lupa subscribe channel YouTube & Telegram: SHARE IT HUB"
