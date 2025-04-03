@@ -15,16 +15,16 @@ if [[ "$answer" =~ ^[Yy]$ ]]; then
     USE_SCREEN=true
 else
     USE_SCREEN=false
-fi
+if
 
 # Clone repository bot
 git clone https://github.com/shareithub/autosave-airdrop.git
 cd autosave-airdrop
 
-# Cek & buat file .env jika belum ada
+# Cek & buat ifle .env jika belum ada
 if [ ! -f .env ]; then
     touch .env
-fi
+if
 
 cek_env() {
     TELEGRAM_TOKEN=$(grep "^TELEGRAM_BOT_TOKEN=" .env | cut -d '=' -f2 | tr -d ' ')
@@ -39,7 +39,7 @@ while true; do
         echo "ERROR: TELEGRAM_TOKEN dan ADMIN_ID harus diisi. Silakan masukkan kembali."
     else
         break
-    fi
+    if
 done
 
 # Setup Python virtual environment
@@ -53,7 +53,7 @@ if [ "$USE_SCREEN" = true ]; then
     echo "Bot berjalan dalam screen session 'auto-list-airdrop'."
 else
     python3 bot.py
-fi
+if
 
 echo "Proses berjalan, silakan tes dengan menjalankan bot Telegram."
 echo "Jangan lupa subscribe channel YouTube & Telegram: SHARE IT HUB"
