@@ -2,3 +2,4 @@ python-telegram-bot
 python-dotenv
 requests
 python-telegram-bot[job-queue]
+openpyxl
